@@ -6,15 +6,21 @@
 //  Copyright © 2016年 base. All rights reserved.
 //
 
+
 #import "UIImageTool.h"
-#import "MBProgressHUDTool.h"
 #import <AVFoundation/AVFoundation.h>
+#import <objc/runtime.h>
+#import <AssetsLibrary/AssetsLibrary.h>
+
+
 
 #define PHOTO_KEY @"photoVC"
 #define PHOTOBLOCK_KEY @"photoBlcok"
 
 static UIImageTool *manager;
 @interface UIImageTool () <UIActionSheetDelegate,UIImagePickerControllerDelegate,UINavigationControllerDelegate>
+
+@property (nonatomic, assign) BOOL edit;
 @end
 
 @implementation UIImageTool
@@ -23,6 +29,7 @@ static UIImageTool *manager;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         manager = [self new];
+        manager.edit = NO;
     });
     return manager;
 }
@@ -30,21 +37,19 @@ static UIImageTool *manager;
 #pragma mark - 保存图片
 + (void)saveImage:(UIImage *)image {
     UIImageWriteToSavedPhotosAlbum(image, self, @selector(image:didFinishSavingWithError:contextInfo:), NULL);
-    [MBProgressHUDTool showWindowWith:nil];
 }
 
 - (void)image:(UIImage *)image didFinishSavingWithError:(NSError *)error contextInfo:(void *)contextInfo;
 {
-    [MBProgressHUDTool hideHuD];
     if (error) {
-        [MBProgressHUDTool showHint:@"保存失败"];
+        NSLog(@"保存失败");
     } else {
-        [MBProgressHUDTool showHint:@"保存成功"];
+        NSLog(@"保存成功");
     }
 }
 
 #pragma mark - 生成二维码
-+ (UIImage *)createCodeImageWithSize:(CGFloat)size {
++ (UIImage *)createCodeImageWithSize:(CGFloat)size codeStr:(NSString *)str {
     UIImage *codeImage = [UIImage new];
     //二维码滤镜
     
@@ -53,12 +58,7 @@ static UIImageTool *manager;
     
     [filter setDefaults];
     
-    //将字符串转换成NSData
-    NSUserDefaults * userDefaults = [NSUserDefaults standardUserDefaults];
-    NSString * userName = [userDefaults objectForKey:@"userName"];
-    
-    //添加baishanghui区分是否是合法二维码
-    NSData *data=[[NSString stringWithFormat:@"http://yzf.ftezu.com/wap/index.php?ctl=user&act=register&code=%@",userName] dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *data=[str dataUsingEncoding:NSUTF8StringEncoding];
     
     //通过KVO设置滤镜inputmessage数据
     
@@ -70,7 +70,7 @@ static UIImageTool *manager;
     
     //将CIImage转换成UIImage,并放大显示
     
-    codeImage = [UIImageTool createNonInterpolatedUIImageFormCIImage:outputImage withSize:1000.0];
+    codeImage = [UIImageTool createNonInterpolatedUIImageFormCIImage:outputImage withSize:size];
     
     return codeImage;
 }
@@ -129,10 +129,16 @@ static UIImageTool *manager;
 }
 
 #pragma mark - 压缩照片
-+ (NSData *)cutImageWithImage:(UIImage *)image Maxlength:(NSInteger)length {
-    NSData *imagedata = UIImageJPEGRepresentation(image, 1.0);
-    if ([imagedata length]>length) {
-        imagedata = UIImageJPEGRepresentation(image, 1048576/[imagedata length]);
++ (NSData *)compressImage:(UIImage *)image percentage:(CGFloat)percentage {
+    NSData *imagedata = UIImageJPEGRepresentation(image, percentage);
+    return imagedata;
+}
+
++ (NSData *)compressImage:(UIImage *)image maxLength:(CGFloat)maxLength {
+    CGFloat max = maxLength * 1048576;
+    NSData *imagedata = UIImageJPEGRepresentation(image, 1);
+    if (imagedata.length > max) {
+        imagedata = UIImageJPEGRepresentation(image, max/imagedata.length);
     }
     return imagedata;
 }
@@ -150,37 +156,23 @@ static UIImageTool *manager;
 }
 
 #pragma mark - 打开相册或相机
-- (void)openAlbumOrPhotoInVC:(UIViewController *)vc completion:(void(^)(UIImage *image))backImage{
+- (void)openCameraInVC:(UIViewController *)vc resultImage:(void(^)(UIImage *image))backImage {
+    objc_setAssociatedObject(self, PHOTO_KEY, vc, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(self, PHOTOBLOCK_KEY, backImage, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [self takePhoto];
+}
+
+- (void)openAlbumOrPhotoInVC:(UIViewController *)vc completion:(void(^)(UIImage *image))backImage canEdit:(BOOL)edit {
     
     objc_setAssociatedObject(self, PHOTO_KEY, vc, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(self, PHOTOBLOCK_KEY, backImage, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    UIView *view = [[UIApplication sharedApplication].delegate window];
-    UIActionSheet *action = [[UIActionSheet alloc]
-                     initWithTitle:nil
-                     delegate:self
-                     cancelButtonTitle:@"取消"
-                     destructiveButtonTitle:nil
-                     otherButtonTitles: @"打开照相机", @"打开手机相册",nil];
-    action.actionSheetStyle=UIActionSheetStyleAutomatic;
-    [action showInView:view];
+    self.edit = edit;
+    
+    UIActionSheet *sheet = [[UIActionSheet alloc] initWithTitle:@"请选择图片" delegate:self cancelButtonTitle:@"取消" destructiveButtonTitle:nil otherButtonTitles:@"打开照相机",@"打开手机相册", nil];
+    [sheet showInView:vc.view];
+
 }
 
-//UIActionSheetDelegate
-- (void)actionSheet:(UIActionSheet *)actionSheet clickedButtonAtIndex:(NSInteger)buttonIndex
-{
-    switch (buttonIndex)
-    {
-        case 0:  //打开照相机拍照
-            [self takePhoto];
-            break;
-            
-        case 1:  //打开本地相册
-            [self LocalPhoto];
-            break;
-        default:
-            break;
-    }
-}
 
 //开始拍照
 -(void)takePhoto
@@ -188,7 +180,9 @@ static UIImageTool *manager;
     UIViewController *vc = objc_getAssociatedObject(self, PHOTO_KEY);
     UIImagePickerController *picker = [[UIImagePickerController alloc]init];
     picker.delegate = self;
-    picker.allowsEditing = YES;
+    picker.allowsEditing = self.edit;
+    
+    picker.editing = YES;
     UIImagePickerControllerSourceType sourceType = UIImagePickerControllerSourceTypeCamera;
     if ([UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeCamera]) {
         
@@ -221,8 +215,9 @@ static UIImageTool *manager;
     {
         NSLog(@"模拟其中无法打开相机,请在真机中使用");
     }
-
+    
 }
+
 
 //打开本地相册
 -(void)LocalPhoto
@@ -256,6 +251,26 @@ static UIImageTool *manager;
 - (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker
 {
     [picker dismissViewControllerAnimated:YES completion:nil];
+}
+
+
+#pragma sheet - 代理
+- (void)actionSheet:(UIActionSheet *)actionSheet clickedButtonAtIndex:(NSInteger)buttonIndex {
+    switch (buttonIndex) {
+        case 0:
+        {
+          [self takePhoto];
+        }
+            break;
+        case 1:
+        {
+           [self LocalPhoto];
+        }
+            break;
+
+        default:
+            break;
+    }
 }
 
 
